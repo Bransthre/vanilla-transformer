@@ -9,7 +9,7 @@ class MultiHeadAttention(nn.Module):
     def __init__(
         self,
         hidden_dim: int,  # d_{model} in original paper
-        nheads: int,  # h in original paper
+        nheads: int,
         mask: torch.Tensor = None,
     ):
         super().__init__()
@@ -23,11 +23,6 @@ class MultiHeadAttention(nn.Module):
         self.d_v = hidden_dim / nheads
 
         self.W_qkv = nn.Linear(hidden_dim, self.d_k * 2 + self.d_v, bias=False)
-        """
-        The formulation for W_qkv is esentially a concatenation of:
-        - W^Q, W^K, W^V vertically
-        - W_1^Q, W_2^Q, \dots, W_h^Q horizontally
-        """  # TODO: Figure out
         self.W_o = nn.Linear(nheads * self.d_v, hidden_dim, bias=False)
 
     def reset_parameters(self):
@@ -73,16 +68,19 @@ class MultiHeadAttention(nn.Module):
         K: torch.Tensor,
         V: torch.Tensor,
         is_masked: bool = False,
-    ):
-        return  # TODO: Implement is_masked as well, and partitions
+    ):  # We received (B, H, S, E/H)
+        temp = torch.matmul(Q, K.T) / torch.sqrt(self.d_k)
+        if is_masked:
+            temp = temp.masked_fill(self.mask == 0, -float("inf"))
+        return torch.matmul(F.softmax(temp, dim=-1), V)
 
     def scaled_dot_product_sparse(
         self,
         Q: torch.Tensor,
         K: torch.Tensor,
         V: torch.Tensor,
-        is_masked: bool = True,  # Toggles the sparsifications
     ):
+        assert self.is_masked, "Sparse operations should only occur on masked data"
         pass  # TODO: Implement
 
     def forward(
@@ -98,19 +96,21 @@ class MultiHeadAttention(nn.Module):
             q, k, v = self._get_cross_attention_qkv(
                 encoder_output=encoder_outputs, decoder_output=decoder_outputs
             )
-            attention_outcomes = self.scaled_dot_product(
-                q, k, v, is_masked=self.is_masked
-            )
             batch_size, seq_len, embed_size = decoder_outputs.shape
         else:
             self_attention_input = encoder_outputs
             if encoder_outputs is None:
                 self_attention_input = decoder_outputs
             q, k, v = self._get_self_attention_qkv(x=self_attention_input)
-            attention_outcomes = self.scaled_dot_product(
-                q, k, v, is_masked=self.is_masked
-            )
             batch_size, seq_len, embed_size = self_attention_input.shape
+        # The output qs have dimensions (B, S, H, E/H)
+        # We would transpose them into (B, H, S, E/H)
+
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+
+        attention_outcomes = self.scaled_dot_product(q, k, v, is_masked=self.is_masked)
 
         concat_attention = attention_outcomes.reshape(batch_size, seq_len, embed_size)
         # Shape of cat above follows whoever is using this attention.
